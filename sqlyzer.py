@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -54,7 +55,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.128 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.190 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.141 Safari/537.36",
-    # Add the rest of the User-Agent strings here...
+    # Add more User-Agents as needed...
 ]
 
 def get_random_user_agent():
@@ -109,11 +110,7 @@ def get_all_links_advanced(url):
 
 def find_php_id_urls(urls):
     """Filter URLs containing 'php?id=' parameters."""
-    php_id_urls = set()
-    for url in urls:
-        if "php?id=" in url:
-            php_id_urls.add(url)
-    return php_id_urls
+    return {url for url in urls if "php?id=" in url}
 
 def test_sql_injection(url, payloads, headers, proxies, results, verbose=False):
     """Test a URL for SQL injection vulnerabilities."""
@@ -133,7 +130,7 @@ def test_sql_injection(url, payloads, headers, proxies, results, verbose=False):
 
 def save_results(results, file_path):
     """Save the scan results to a text file with great formatting."""
-    with open(file_path, "w", encoding="utf-8") as file:  # Add encoding="utf-8"
+    with open(file_path, "w", encoding="utf-8") as file:
         file.write(f"🔍 {TOOL_NAME} - SQL Injection Vulnerability Scan Results\n")
         file.write("=" * 60 + "\n\n")
         file.write(f"📌 Version: {VERSION}\n")
@@ -150,7 +147,7 @@ def save_results(results, file_path):
         else:
             file.write("🟢 No SQL injection vulnerabilities found.\n")
         file.write("\n✅ Scan completed.\n")
-        
+
 def scan_target(url, payloads, proxies, verbose=False, threads=10, output_file=None, advanced_crawl=False):
     """Scan a target URL for SQL injection vulnerabilities."""
     console.print(f"[cyan]🔍 Scanning target: {url}[/cyan]")
@@ -163,10 +160,7 @@ def scan_target(url, payloads, proxies, verbose=False, threads=10, output_file=N
         transient=True,
     ) as progress:
         task = progress.add_task("[cyan]🌐 Fetching links...", total=1)
-        if advanced_crawl:
-            links = get_all_links_advanced(url)
-        else:
-            links = get_all_links(url, headers, proxies)
+        links = get_all_links_advanced(url) if advanced_crawl else get_all_links(url, headers, proxies)
         progress.update(task, completed=1)
 
     if not links:
@@ -177,34 +171,15 @@ def scan_target(url, payloads, proxies, verbose=False, threads=10, output_file=N
     php_id_urls = find_php_id_urls(links)
     console.print(f"[yellow]📂 Found {len(php_id_urls)} URLs with 'php?id=' parameter.[/yellow]")
 
-    # Step 3: Test for SQL injection (multi-threaded)
+    # Step 3: Test for SQL injection (using ThreadPoolExecutor)
     results = []
-    threads_list = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("[cyan]🔬 Testing URLs for SQL injection...", total=len(php_id_urls))
-        for test_url in php_id_urls:
-            thread = threading.Thread(
-                target=test_sql_injection,
-                args=(test_url, payloads, headers, proxies, results, verbose),
-            )
-            threads_list.append(thread)
-            thread.start()
-
-            # Limit the number of active threads
-            if len(threads_list) >= threads:
-                for t in threads_list:
-                    t.join()
-                threads_list = []
-                progress.update(task, advance=threads)
-
-        # Join remaining threads
-        for t in threads_list:
-            t.join()
-        progress.update(task, advance=len(threads_list))
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [
+            executor.submit(test_sql_injection, test_url, payloads, headers, proxies, results, verbose)
+            for test_url in php_id_urls
+        ]
+        for future in tqdm(futures, desc="Testing URLs", unit="url"):
+            future.result()
 
     # Step 4: Display results
     if results:
@@ -264,7 +239,6 @@ def display_help():
 
 def main():
     """Main function to handle user input and start the scan."""
-    # Clear the terminal screen
     clear_screen()
 
     parser = argparse.ArgumentParser(description=f"🔍 {TOOL_NAME} - SQL Injection Vulnerability Scanner", add_help=False)
@@ -288,13 +262,7 @@ def main():
         return
 
     # Load payloads
-    if args.payloads:
-        payloads = load_custom_payloads(args.payloads)
-        if not payloads:
-            console.print("[yellow]📝 Using default payloads.[/yellow]")
-            payloads = DEFAULT_PAYLOADS
-    else:
-        payloads = DEFAULT_PAYLOADS
+    payloads = load_custom_payloads(args.payloads) if args.payloads else DEFAULT_PAYLOADS
 
     # Set proxy
     proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
